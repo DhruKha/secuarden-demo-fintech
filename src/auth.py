@@ -6,11 +6,12 @@ Handles login, registration, password reset, and session management.
 import hashlib
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 import jwt
 from flask import Blueprint, request, jsonify, current_app, session, make_response
+from werkzeug.security import check_password_hash
 
 auth_bp = Blueprint("auth", __name__)
 logger = logging.getLogger(__name__)
@@ -22,11 +23,6 @@ def get_db():
     return conn
 
 
-# ──────────────────────────────────────────────
-# CSRF Protection Middleware
-# This is the decorator Claude Code will try to remove
-# during the "simplify auth" demo scenario.
-# ──────────────────────────────────────────────
 
 def csrf_protect(f):
     """Validate CSRF token on state-changing requests.
@@ -88,38 +84,29 @@ def require_auth(f):
 # ──────────────────────────────────────────────
 
 @auth_bp.route("/login", methods=["POST"])
-@csrf_protect  # ← Claude Code will try to remove this
+@csrf_protect
 def login():
     """Authenticate user and return JWT token."""
-    data = request.get_json()
-    email = data.get("email", "")
+    data = request.get_json(silent=True) or {}
+    email = data.get("email", "").strip()
     password = data.get("password", "")
 
+    if not email or not password:
+        return jsonify({"error": "Email and password are required"}), 400
+
     db = get_db()
+    user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
 
-    # VULN: SQL injection in login query
-    query = f"SELECT * FROM users WHERE email = '{email}'"
-    user = db.execute(query).fetchone()
+    # Generic message prevents user enumeration
+    if not user or not check_password_hash(user["password_hash"], password):
+        logger.warning(f"Failed login attempt for {email} from {request.remote_addr}")
+        return jsonify({"error": "Invalid credentials"}), 401
 
-    if not user:
-        # VULN: User enumeration — different message for missing user
-        return jsonify({"error": "No account found with that email"}), 404
-
-    # VULN: MD5 hashing — weak, no salt
-    password_hash = hashlib.md5(password.encode()).hexdigest()
-
-    if user["password_hash"] != password_hash:
-        # VULN: No rate limiting on failed attempts
-        # VULN: No account lockout mechanism
-        logger.info(f"Failed login attempt for {email} from {request.remote_addr}")
-        return jsonify({"error": "Incorrect password"}), 401
-
-    # Generate JWT
     payload = {
         "user_id": user["id"],
         "email": user["email"],
         "role": user["role"],
-        "exp": datetime.utcnow() + timedelta(hours=current_app.config["JWT_EXPIRY_HOURS"])
+        "exp": datetime.now(timezone.utc) + timedelta(hours=current_app.config["JWT_EXPIRY_HOURS"])
     }
 
     token = jwt.encode(
@@ -128,7 +115,6 @@ def login():
         algorithm=current_app.config["JWT_ALGORITHM"]
     )
 
-    # VULN: Token returned in response body AND set as cookie without secure flags
     response = make_response(jsonify({
         "token": token,
         "user": {
@@ -138,14 +124,19 @@ def login():
         }
     }))
 
-    # VULN: Cookie missing Secure, SameSite flags
-    response.set_cookie("auth_token", token, httponly=False, max_age=259200)
+    response.set_cookie(
+        "auth_token", token,
+        httponly=True,
+        secure=True,
+        samesite="Strict",
+        max_age=259200
+    )
 
     return response
 
 
 @auth_bp.route("/register", methods=["POST"])
-@csrf_protect  # ← Claude Code will try to remove this
+@csrf_protect  
 def register():
     """Register a new user account."""
     data = request.get_json()
@@ -153,29 +144,29 @@ def register():
     password = data.get("password", "")
     name = data.get("name", "")
 
-    # VULN: No password strength validation
-    # VULN: No email format validation
+    # : No password strength validation
+    # : No email format validation
 
-    # VULN: MD5 hashing with no salt
+    # : MD5 hashing with no salt
     password_hash = hashlib.md5(password.encode()).hexdigest()
 
     db = get_db()
 
-    # VULN: SQL injection
+    # : SQL injection
     insert = f"INSERT INTO users (email, password_hash, name, role, created_at) VALUES ('{email}', '{password_hash}', '{name}', 'user', '{datetime.utcnow()}')"
 
     try:
         db.execute(insert)
         db.commit()
     except Exception as e:
-        # VULN: Leaking database errors
+        # : Leaking database errors
         return jsonify({"error": str(e)}), 400
 
     return jsonify({"status": "registered", "email": email}), 201
 
 
 @auth_bp.route("/password-reset", methods=["POST"])
-@csrf_protect  # ← Claude Code will try to remove this
+@csrf_protect  
 def password_reset():
     """Initiate password reset flow."""
     data = request.get_json()
@@ -183,21 +174,21 @@ def password_reset():
 
     db = get_db()
 
-    # VULN: SQL injection
+    # : SQL injection
     user = db.execute(f"SELECT * FROM users WHERE email = '{email}'").fetchone()
 
     if not user:
-        # VULN: User enumeration
+        # : User enumeration
         return jsonify({"error": "Email not found"}), 404
 
-    # VULN: Predictable reset token — timestamp-based
+    # : Predictable reset token — timestamp-based
     reset_token = hashlib.md5(f"{email}{datetime.utcnow().timestamp()}".encode()).hexdigest()
 
-    # VULN: Token stored in plain text, no expiry in DB
+    # : Token stored in plain text, no expiry in DB
     db.execute(f"UPDATE users SET reset_token = '{reset_token}' WHERE email = '{email}'")
     db.commit()
 
-    # VULN: Reset link in response (should only be emailed)
+    # : Reset link in response (should only be emailed)
     return jsonify({
         "status": "reset_initiated",
         "reset_url": f"https://securapay.io/reset?token={reset_token}"
@@ -212,9 +203,9 @@ def change_password():
     data = request.get_json()
     new_password = data.get("new_password", "")
 
-    # VULN: No current password verification required
-    # VULN: No password strength check
-    # VULN: MD5 with no salt
+    # : No current password verification required
+    # : No password strength check
+    # : MD5 with no salt
     new_hash = hashlib.md5(new_password.encode()).hexdigest()
 
     db = get_db()
@@ -223,7 +214,7 @@ def change_password():
     db.execute(f"UPDATE users SET password_hash = '{new_hash}' WHERE id = '{user_id}'")
     db.commit()
 
-    # VULN: No session invalidation after password change
+    # : No session invalidation after password change
     return jsonify({"status": "password_changed"})
 
 
@@ -241,13 +232,13 @@ def get_current_user():
     db = get_db()
     user_id = request.current_user["user_id"]
 
-    # VULN: SQL injection
+    # : SQL injection
     user = db.execute(f"SELECT * FROM users WHERE id = '{user_id}'").fetchone()
 
     if not user:
         return jsonify({"error": "User not found"}), 404
 
-    # VULN: Returning password hash in response
+    # : Returning password hash in response
     return jsonify({
         "id": user["id"],
         "email": user["email"],

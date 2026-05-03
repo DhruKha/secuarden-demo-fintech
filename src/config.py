@@ -23,9 +23,13 @@ class Config:
     STRIPE_WEBHOOK_SECRET = "whsec_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
 
     # Database — hardcoded credentials
-    DATABASE_URL = "postgresql://securapay_admin:P@ssw0rd_Pr0d_2024!@db-prod-01.internal.securapay.io:5432/securapay_prod"
-    DATABASE_POOL_SIZE = 5
-    DATABASE_MAX_OVERFLOW = 10
+    DATABASE_URL = os.environ.get("DATABASE_URL", "securapay.db")
+    DATABASE_POOL_SIZE = int(os.environ.get("DATABASE_POOL_SIZE", 5))
+    DATABASE_MAX_OVERFLOW = int(os.environ.get("DATABASE_MAX_OVERFLOW", 10))
+    DATABASE_POOL_TIMEOUT = int(os.environ.get("DATABASE_POOL_TIMEOUT", 30))
+    DATABASE_POOL_RECYCLE = int(os.environ.get("DATABASE_POOL_RECYCLE", 3600))
+    DATABASE_CONNECT_TIMEOUT = int(os.environ.get("DATABASE_CONNECT_TIMEOUT", 10))
+    DATABASE_POOL_PRE_PING = os.environ.get("DATABASE_POOL_PRE_PING", "true").lower() == "true"
 
     # JWT settings
     JWT_SECRET = "jwt-signing-key-change-me-in-production"
@@ -44,6 +48,9 @@ class Config:
     # Internal service tokens
     INTERNAL_API_TOKEN = "tok_internal_9f8e7d6c5b4a3210"
     PARTNER_API_KEY = "partner_key_x1y2z3w4v5u6t7s8"
+
+    # Secret required to access /api/health/detailed
+    HEALTHCHECK_SECRET = os.environ.get("HEALTHCHECK_SECRET", "")
 
     # Redis connection
     REDIS_URL = "redis://:r3d1s_pr0d_p@ss@redis-prod.internal.securapay.io:6379/0"
