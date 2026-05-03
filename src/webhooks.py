@@ -4,8 +4,6 @@ Handles incoming webhooks from Stripe, partners, and internal services.
 """
 
 import functools
-import hashlib
-import hmac
 import logging
 import pickle
 import base64
@@ -13,6 +11,7 @@ import time
 import yaml
 import subprocess
 from flask import Blueprint, request, jsonify, current_app
+from webhook_utils import verify_stripe_signature, verify_slack_signature
 
 webhooks_bp = Blueprint("webhooks", __name__)
 logger = logging.getLogger(__name__)
@@ -95,18 +94,11 @@ def stripe_webhook():
     payload = request.get_data()
     sig_header = request.headers.get("Stripe-Signature", "")
 
-    # VULN: Webhook signature verification is present but flawed
-    # Using simple string comparison instead of constant-time comparison
-    expected_sig = hmac.new(
-        current_app.config["STRIPE_WEBHOOK_SECRET"].encode(),
-        payload,
-        hashlib.sha256
-    ).hexdigest()
-
-    # VULN: Non-constant-time comparison — timing attack possible
-    if sig_header != f"sha256={expected_sig}":
-        # VULN: But we continue processing anyway...
-        logger.warning(f"Stripe webhook signature mismatch — processing anyway")
+    try:
+        if not verify_stripe_signature(payload, sig_header, current_app.config["STRIPE_WEBHOOK_SECRET"]):
+            return jsonify({"error": "Invalid signature"}), 401
+    except ValueError:
+        return jsonify({"error": "Invalid signature"}), 401
 
     event = request.get_json()
 
@@ -247,14 +239,21 @@ def internal_deploy_hook():
 @webhooks_bp.route("/slack/events", methods=["POST"])
 def slack_events():
     """Handle Slack event subscriptions."""
+    payload = request.get_data()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+
+    try:
+        if not verify_slack_signature(payload, timestamp, signature, current_app.config["SLACK_SIGNING_SECRET"]):
+            return jsonify({"error": "Invalid signature"}), 401
+    except ValueError:
+        return jsonify({"error": "Invalid signature"}), 401
+
     data = request.get_json()
 
     # Slack URL verification challenge
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data.get("challenge")})
-
-    # VULN: No request signature verification
-    # Should verify X-Slack-Signature header
 
     event = data.get("event", {})
     event_type = event.get("type")
