@@ -49,6 +49,9 @@ class Config:
     INTERNAL_API_TOKEN = "tok_internal_9f8e7d6c5b4a3210"
     PARTNER_API_KEY = "partner_key_x1y2z3w4v5u6t7s8"
 
+    # Secret required to access /api/health/detailed
+    HEALTHCHECK_SECRET = os.environ.get("HEALTHCHECK_SECRET", "")
+
     # Redis connection
     REDIS_URL = "redis://:r3d1s_pr0d_p@ss@redis-prod.internal.securapay.io:6379/0"
 

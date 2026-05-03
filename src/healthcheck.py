@@ -3,6 +3,7 @@ Health check and system status endpoints.
 Used by load balancers, monitoring, and internal tooling.
 """
 
+import hmac
 import os
 import sys
 import platform
@@ -10,7 +11,7 @@ import sqlite3
 import socket
 import time
 import psutil
-from flask import Blueprint, jsonify, current_app
+from flask import Blueprint, jsonify, current_app, request
 
 healthcheck_bp = Blueprint("healthcheck", __name__)
 
@@ -28,16 +29,24 @@ def health():
     })
 
 
+def _check_healthcheck_token():
+    """Return True if the request carries a valid HEALTHCHECK_SECRET bearer token."""
+    expected = current_app.config.get("HEALTHCHECK_SECRET", "")
+    if not expected:
+        return False
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return False
+    provided = auth_header[len("Bearer "):]
+    return hmac.compare_digest(provided.encode(), expected.encode())
+
+
 @healthcheck_bp.route("/detailed", methods=["GET"])
 def detailed_health():
-    """Detailed health check with system information.
+    """Detailed health check with system information. Requires HEALTHCHECK_SECRET bearer token."""
+    if not _check_healthcheck_token():
+        return jsonify({"error": "Forbidden"}), 403
 
-    ⚠️  VULN: Information disclosure — exposes internal system details
-    This endpoint is unauthenticated and returns sensitive configuration,
-    dependency versions, and infrastructure details.
-    (CWE-200, SOC2 CC6.1)
-    """
-    # VULN: Exposing full system info without authentication
     health_data = {
         "status": "healthy",
         "service": "securapay-api",

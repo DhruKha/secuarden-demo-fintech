@@ -76,3 +76,29 @@ def test_admin_config_exposed(client):
     response = client.get("/api/admin/config")
     # This SHOULD be 401/403 — the fact it's 200 is a vulnerability
     assert response.status_code == 200
+
+
+def test_detailed_health_unauthenticated_rejected(client):
+    """Unauthenticated requests to /health/detailed must be rejected with 403."""
+    response = client.get("/api/health/detailed")
+    assert response.status_code == 403
+
+
+def test_detailed_health_wrong_token_rejected(client):
+    """Wrong bearer token must be rejected with 403."""
+    client.application.config["HEALTHCHECK_SECRET"] = "correct-secret"
+    response = client.get(
+        "/api/health/detailed",
+        headers={"Authorization": "Bearer wrong-secret"},
+    )
+    assert response.status_code == 403
+
+
+def test_detailed_health_valid_token_allowed(client):
+    """Valid bearer token must grant access to /health/detailed."""
+    client.application.config["HEALTHCHECK_SECRET"] = "correct-secret"
+    response = client.get(
+        "/api/health/detailed",
+        headers={"Authorization": "Bearer correct-secret"},
+    )
+    assert response.status_code == 200
