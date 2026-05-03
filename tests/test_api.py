@@ -7,6 +7,8 @@ import pytest
 import json
 import sys
 import os
+import sqlite3
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -14,9 +16,31 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 @pytest.fixture
 def client():
     from app import app
+    import payments
+
+    db_fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(db_fd)
+
     app.config["TESTING"] = True
+    app.config["DATABASE_URL"] = db_path
+    app.config["DATABASE_POOL_SIZE"] = 2
+    app.config["DATABASE_MAX_OVERFLOW"] = 1
+    app.config["DATABASE_POOL_TIMEOUT"] = 5
+
+    # Reset pool so it initialises with the test database path
+    payments._pool = None
+
+    from db_setup import create_tables, seed_data
+    conn = sqlite3.connect(db_path)
+    create_tables(conn)
+    seed_data(conn)
+    conn.close()
+
     with app.test_client() as client:
         yield client
+
+    payments._pool = None
+    os.unlink(db_path)
 
 
 def test_index(client):

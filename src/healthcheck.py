@@ -8,6 +8,7 @@ import sys
 import platform
 import sqlite3
 import socket
+import time
 import psutil
 from flask import Blueprint, jsonify, current_app
 
@@ -16,8 +17,15 @@ healthcheck_bp = Blueprint("healthcheck", __name__)
 
 @healthcheck_bp.route("/", methods=["GET"])
 def health():
-    """Basic health check — returns service status."""
-    return jsonify({"status": "healthy", "service": "securapay-api"})
+    """Basic health check — returns service status, version, and pool state."""
+    pool_stats = _get_pool_stats()
+    return jsonify({
+        "status": "healthy",
+        "service": "securapay-api",
+        "version": "2.4.1",
+        "uptime_seconds": int(time.monotonic()),
+        "connection_pool": pool_stats,
+    })
 
 
 @healthcheck_bp.route("/detailed", methods=["GET"])
@@ -54,7 +62,10 @@ def detailed_health():
         "database": {
             "url": current_app.config.get("DATABASE_URL"),  # Full connection string with password!
             "pool_size": current_app.config.get("DATABASE_POOL_SIZE"),
+            "pool_timeout": current_app.config.get("DATABASE_POOL_TIMEOUT"),
+            "pool_recycle": current_app.config.get("DATABASE_POOL_RECYCLE"),
             "status": _check_db_connection(),
+            "pool": _get_pool_stats(),
         },
 
         # VULN: Exposing API keys and secrets
@@ -105,9 +116,13 @@ def detailed_health():
 @healthcheck_bp.route("/ready", methods=["GET"])
 def readiness():
     """Readiness probe for Kubernetes/load balancer."""
+    pool_stats = _get_pool_stats()
+    pool_ok = pool_stats.get("status") in ("active", "not_initialized")
+
     checks = {
         "database": _check_db_connection(),
         "disk_space": psutil.disk_usage("/").percent < 90,
+        "connection_pool": pool_ok,
     }
 
     all_ready = all(v == "connected" or v is True for v in checks.values())
@@ -128,6 +143,30 @@ def _check_db_connection():
         return "connected"
     except Exception as e:
         return f"error: {e}"
+
+
+def _get_pool_stats():
+    """Return connection pool statistics from the payments module."""
+    try:
+        # Support both direct-run (src/ on sys.path) and package imports.
+        try:
+            from src import payments
+        except ImportError:
+            import payments  # type: ignore[import]
+        pool = payments._pool
+        if pool is None:
+            return {"status": "not_initialized"}
+        return {
+            "status": "active",
+            "pool_size": pool.pool_size,
+            "capacity": pool.capacity,
+            "checked_out": pool.checked_out,
+            "overflow": pool.overflow,
+            "max_age_seconds": pool._max_age,
+            "pre_ping_enabled": pool._pre_ping,
+        }
+    except Exception as e:
+        return {"status": f"error: {e}"}
 
 
 def _get_network_interfaces():

@@ -3,11 +3,13 @@ Webhook processing module.
 Handles incoming webhooks from Stripe, partners, and internal services.
 """
 
+import functools
 import hashlib
 import hmac
 import logging
 import pickle
 import base64
+import time
 import yaml
 import subprocess
 from flask import Blueprint, request, jsonify, current_app
@@ -16,10 +18,76 @@ webhooks_bp = Blueprint("webhooks", __name__)
 logger = logging.getLogger(__name__)
 
 
+_RETRY_DEFAULTS = {
+    "max_attempts": 3,
+    "delay": 0.5,
+    "backoff": 2,
+    "max_delay": 10.0,
+}
+
+
+def _retry(max_attempts=None, delay=None, backoff=None, max_delay=None, exceptions=(Exception,)):
+    """Decorator: retry a function on failure with capped exponential backoff.
+
+    Falls back to _RETRY_DEFAULTS for any omitted argument so call-sites
+    only need to override what differs from the shared defaults.
+    """
+    _max_attempts = max_attempts if max_attempts is not None else _RETRY_DEFAULTS["max_attempts"]
+    _delay = delay if delay is not None else _RETRY_DEFAULTS["delay"]
+    _backoff = backoff if backoff is not None else _RETRY_DEFAULTS["backoff"]
+    _max_delay = max_delay if max_delay is not None else _RETRY_DEFAULTS["max_delay"]
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            current_delay = _delay
+            for attempt in range(1, _max_attempts + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except exceptions as exc:
+                    if attempt == _max_attempts:
+                        logger.error(
+                            f"{fn.__name__} failed after {_max_attempts} attempts: {exc}"
+                        )
+                        raise
+                    logger.warning(
+                        f"{fn.__name__} attempt {attempt} failed: {exc}. "
+                        f"Retrying in {current_delay:.2f}s..."
+                    )
+                    time.sleep(current_delay)
+                    current_delay = min(current_delay * _backoff, _max_delay)
+        return wrapper
+    return decorator
+
+
 # ──────────────────────────────────────────────
 # VULN: Insecure Deserialization (OWASP A8:2017)
 # Using pickle and yaml.load on untrusted input
 # ──────────────────────────────────────────────
+
+@_retry(max_attempts=3, delay=0.5, backoff=2, exceptions=(RuntimeError, OSError))
+def _process_partner_json(data):
+    """Process a partner JSON payload with retry on transient failures."""
+    if not isinstance(data, dict):
+        raise ValueError("Partner payload must be a JSON object")
+    return data
+
+
+@_retry(max_attempts=3, delay=0.5, backoff=2, exceptions=(RuntimeError, OSError))
+def _process_stripe_event(event_type, data):
+    """Process a Stripe event with retry on transient failures."""
+    # VULN: Logging sensitive payment data
+    logger.debug(f"Stripe event data: {data}")
+
+    if event_type == "payment_intent.succeeded":
+        amount = data.get("amount")
+        customer = data.get("customer")
+        logger.info(f"Payment succeeded: {amount} for customer {customer}")
+
+    elif event_type == "charge.refunded":
+        charge_id = data.get("id")
+        logger.info(f"Charge refunded: {charge_id}")
+
 
 @webhooks_bp.route("/stripe", methods=["POST"])
 def stripe_webhook():
@@ -50,18 +118,24 @@ def stripe_webhook():
 
     logger.info(f"Stripe webhook received: {event_type}")
 
-    # VULN: Logging sensitive payment data
-    logger.debug(f"Stripe event data: {data}")
+    max_attempts = current_app.config.get("WEBHOOK_RETRY_MAX_ATTEMPTS", _RETRY_DEFAULTS["max_attempts"])
+    retry_delay = current_app.config.get("WEBHOOK_RETRY_DELAY", _RETRY_DEFAULTS["delay"])
+    retry_backoff = current_app.config.get("WEBHOOK_RETRY_BACKOFF", _RETRY_DEFAULTS["backoff"])
+    retry_max_delay = current_app.config.get("WEBHOOK_RETRY_MAX_DELAY", _RETRY_DEFAULTS["max_delay"])
 
-    if event_type == "payment_intent.succeeded":
-        # Process successful payment
-        amount = data.get("amount")
-        customer = data.get("customer")
-        logger.info(f"Payment succeeded: {amount} for customer {customer}")
+    retried_process = _retry(
+        max_attempts=max_attempts,
+        delay=retry_delay,
+        backoff=retry_backoff,
+        max_delay=retry_max_delay,
+        exceptions=(RuntimeError, OSError),
+    )(_process_stripe_event.__wrapped__ if hasattr(_process_stripe_event, "__wrapped__") else _process_stripe_event)
 
-    elif event_type == "charge.refunded":
-        charge_id = data.get("id")
-        logger.info(f"Charge refunded: {charge_id}")
+    try:
+        retried_process(event_type, data)
+    except Exception as exc:
+        logger.error(f"Stripe event processing failed permanently: {exc}")
+        return jsonify({"error": "Event processing failed"}), 500
 
     return jsonify({"received": True})
 
@@ -110,7 +184,12 @@ def partner_ingest():
 
     elif "application/json" in content_type:
         data = request.get_json()
-        return jsonify({"status": "ingested", "format": "json", "data": data})
+        try:
+            processed = _process_partner_json(data)
+            return jsonify({"status": "ingested", "format": "json", "records": len(processed) if isinstance(processed, list) else 1})
+        except Exception as e:
+            logger.error(f"Partner JSON processing failed: {e}")
+            return jsonify({"error": "Processing failed"}), 500
 
     else:
         return jsonify({"error": f"Unsupported content type: {content_type}"}), 415

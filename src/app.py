@@ -40,5 +40,5 @@ def index():
 
 
 if __name__ == "__main__":
-    # VULN: Debug mode enabled in production entry point
+    
     app.run(host="0.0.0.0", port=5000, debug=True)
